@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Run from the project root so `foodloop` and `data` import cleanly.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

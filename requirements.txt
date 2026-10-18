@@ -1,0 +1,7 @@
+# FoodLoop runtime dependencies (what the deployed app needs).
+# Persistence uses the Python standard library (sqlite3) — no DB driver needed.
+streamlit>=1.40,<2.0
+pandas>=2.2,<3.0
+altair>=5,<7          # charts; imported directly (not just transitively via Streamlit)
+
+# Development/test tooling lives in requirements-dev.txt (not installed in prod).

@@ -1,0 +1,22 @@
+# FoodLoop design system — sustainability-tech look.
+# Forest-green accent on a warm neutral background.
+#
+# This file lives at the repository root because Streamlit reads project
+# config from <current-working-directory>/.streamlit/config.toml. The
+# documented run flow is `streamlit run app/Home.py` from the repo root, so
+# the config must sit here (not under app/) to be picked up — and Streamlit
+# Community Cloud also reads repo-root .streamlit/.
+[theme]
+primaryColor = "#2F6B46"
+backgroundColor = "#FAF8F2"
+secondaryBackgroundColor = "#EFEBE0"
+textColor = "#1C2B22"
+font = "sans serif"
+
+[server]
+headless = true
+
+[client]
+# Hide Python tracebacks from teammates in the deployed demo. Streamlit 1.66
+# uses the enum form; "none" is the current equivalent of the older `false`.
+showErrorDetails = "none"

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# Local data (the demo DB is regenerated from seed data)
+data/foodloop.db
+# SQLite WAL/SHM sidecars (created at runtime) and migration backups
+data/*.db-wal
+data/*.db-shm
+data/*.pre-v*.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.secret
