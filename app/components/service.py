@@ -1,10 +1,11 @@
 """Wiring between Streamlit and the FoodLoop core.
 
 Responsibilities kept here (and nowhere else in the UI):
-* make the project root importable so ``foodloop`` / ``data`` resolve
-  regardless of how Streamlit is launched,
 * build a single shared :class:`FoodLoopService` (cached across reruns),
 * seed demo data once (idempotently) and keep expiry current.
+
+(Making the repository root importable lives in ``components/__init__.py`` so
+it runs before any ``foodloop`` import, independent of import order.)
 
 The UI never constructs a ``Repository`` or applies business rules itself;
 it always goes through the service returned here.
@@ -13,22 +14,18 @@ it always goes through the service returned here.
 from __future__ import annotations
 
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
-# --- make the project root importable (app/ is what Streamlit puts on the
-#     path; the core lives one level up) -----------------------------------
+import streamlit as st
+
+from data.seed import ensure_seeded
+from foodloop.repository import Repository
+from foodloop.workflow import FoodLoopService
+
+# Repo root (…/FoodLoop, one level above app/) — used only for the default DB
+# path. ``foodloop``/``data`` are made importable in ``components/__init__``.
 _ROOT = Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-import streamlit as st  # noqa: E402  (after sys.path setup)
-
-from data.seed import ensure_seeded  # noqa: E402
-from foodloop.repository import Repository  # noqa: E402
-from foodloop.workflow import FoodLoopService  # noqa: E402
-
 _DEFAULT_DB = str(_ROOT / "data" / "foodloop.db")
 
 
