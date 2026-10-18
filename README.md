@@ -69,7 +69,7 @@ Runtime-only install (what a deployment uses): `pip install -r requirements.txt`
 .venv\Scripts\python.exe -m pytest
 ```
 
-## Deployment (teammate testing)
+## Deployment
 
 - **Entry point:** `app/Home.py` (run from the repo root).
 - **Python version:** 3.11+. On **Streamlit Community Cloud** this is set in the
