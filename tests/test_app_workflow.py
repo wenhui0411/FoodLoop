@@ -540,7 +540,9 @@ def test_recipient_can_claim_partial_quantity_from_marketplace(db_path):
     # The refreshed card shows what's left, and the picker defaults to it.
     text = " ".join(m.value for m in at.markdown)
     assert "15 of 20 loaves available" in text
-    assert at.number_input(key=f"claim-qty-{donation.id}").value == 15
+    picker = at.number_input(key=f"claim-qty-{donation.id}")
+    assert picker.value == 15
+    assert picker.proto.set_value   # the new default reaches the browser too
 
 
 def test_stale_marketplace_claim_cannot_overreserve(db_path):
@@ -767,6 +769,7 @@ def test_donate_form_resets_after_success_and_keeps_other_state(db_path):
     from datetime import date
 
     at = _app_test("views/donate.py").run()
+    donor_area = at.text_input(key="f_area").value   # the donor's own default
     at.session_state["unrelated_page_state"] = "keep me"
     _fill_valid_donation(at)
     at.date_input(key="f_bb").set_value(date.today() + timedelta(days=2))
@@ -774,21 +777,30 @@ def test_donate_form_resets_after_success_and_keeps_other_state(db_path):
     at.run()
 
     assert not at.exception
-    # Fields are back to their defaults...
+    # Fields are back to their defaults on the server...
     assert at.text_input(key="f_title").value == ""
     assert at.text_area(key="f_desc").value == ""
     assert at.number_input(key="f_qty").value == 1.0
+    assert at.text_input(key="f_area").value == donor_area
     assert at.date_input(key="f_bb").value is None
-    # ...with a clear success message, and unrelated state left alone.
-    assert any("Reset Loaves" in s.value for s in at.success)
+    # ...and actually pushed to the browser. Streamlit only overwrites what the
+    # browser shows when the element carries set_value; deleting the keys
+    # (the original fix) reset the server copy but left old entries on screen.
+    for widget in (at.text_input(key="f_title"), at.text_area(key="f_desc"),
+                   at.number_input(key="f_qty"), at.date_input(key="f_bb"),
+                   at.text_area(key="f_notes")):
+        assert widget.proto.set_value, f"{widget.key} not pushed to the browser"
+    # Success is the toast queued for the next page render; no inline banner.
+    assert not at.success
+    assert any("Reset Loaves" in msg for msg, _ in at.session_state["_flashes"])
+    # Unrelated state is left alone.
     assert at.session_state["fl_role"] == "donor"
     assert at.session_state["unrelated_page_state"] == "keep me"
 
-    # A further run (no click) neither re-submits nor re-shows the message.
+    # A further run (no click) neither re-submits nor resets again.
     at.run()
     titles = [d.title for d in Repository(db_path).list_donations()]
     assert titles.count("Reset Loaves") == 1
-    assert not at.success
 
 
 @pytest.mark.parametrize("qty, unit, fragment", [

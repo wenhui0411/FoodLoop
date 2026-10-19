@@ -56,8 +56,9 @@ def do_claim(donation_id: str, quantity: float) -> None:
     except (EligibilityError, DuplicateClaimError, InvalidTransitionError,
             OverReservationError, ClaimsClosedError) as exc:
         ui.flash(str(exc), icon="⚠️")
-    # Keyed widgets keep their last value across reruns; drop it so the picker
-    # re-defaults to the freshly computed remaining quantity.
+    # Keyed widgets keep their last value across reruns; drop it (the widget
+    # already exists this run, so it can't be assigned) and the picker
+    # re-seeds the fresh claimable quantity on the next run.
     for key in (f"claim-qty-{donation_id}", f"claim-qty-dialog-{donation_id}"):
         st.session_state.pop(key, None)
     st.rerun()
@@ -74,10 +75,14 @@ def claim_quantity_input(d, key: str) -> float:
     default = service.claimable_quantity(d.id, _acting_recipient.id)
     unit = d.quantity.unit
     label = f"Quantity to reserve ({unit.value})"
-    if is_whole_unit(unit) and float(default).is_integer():
-        return st.number_input(label, min_value=1, value=int(default), step=1, key=key)
-    return st.number_input(label, min_value=0.0, value=float(default), step=0.1,
-                           format="%.3f", key=key)
+    whole = is_whole_unit(unit) and float(default).is_integer()
+    # Seed via session state (assigned, not passed as value=) so Streamlit
+    # pushes the fresh default to the browser after do_claim drops the key.
+    if key not in st.session_state:
+        st.session_state[key] = int(default) if whole else float(default)
+    if whole:
+        return st.number_input(label, min_value=1, step=1, key=key)
+    return st.number_input(label, min_value=0.0, step=0.1, format="%.3f", key=key)
 
 
 # --------------------------------------------------------------------------
