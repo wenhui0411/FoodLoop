@@ -496,3 +496,361 @@ def test_donor_can_withdraw_available_listing(db_path):
     # Nothing was committed, so closing the listing cancels it.
     assert repo.get_donation(donation.id).status is DonationStatus.CANCELLED
     assert repo.get_donation(donation.id).closed_to_claims is True
+
+
+# --------------------------------------------------------------------------
+# Bug-fix regressions: partial claims in the marketplace
+# --------------------------------------------------------------------------
+def _add_second_recipient(repo: Repository) -> None:
+    repo.add_recipient(Recipient(
+        "r2", "Beta Shelter", RecipientType.SHELTER, Location("Central"),
+        accepted_categories={FoodCategory.BAKERY},
+        storage_capabilities={StorageRequirement.AMBIENT},
+        collection_days={"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+        collection_start_hour=0, collection_end_hour=24, verified=True,
+    ))
+
+
+def _marketplace_as(recipient_name: str):
+    at = _app_test("views/marketplace.py", "recipient")
+    at.session_state["fl_recipient_name"] = recipient_name
+    return at
+
+
+def _claim_via_card(at, donation_id: str, qty) -> None:
+    at.number_input(key=f"claim-qty-{donation_id}").set_value(qty)
+    _button(at, f"claim-{donation_id}").click()
+    at.run()
+
+
+def test_recipient_can_claim_partial_quantity_from_marketplace(db_path):
+    repo = _seed_minimal(db_path)
+    donation = _add_available(repo)  # 20 loaves
+
+    at = _marketplace_as("Alpha Food Bank").run()
+    # Defaults to everything still available.
+    assert at.number_input(key=f"claim-qty-{donation.id}").value == 20
+    _claim_via_card(at, donation.id, 5)
+
+    assert not at.exception
+    claims = repo.list_claims_for_donation(donation.id)
+    assert [c.quantity_value for c in claims] == [5]
+    assert repo.donation_availability(donation.id).remaining == 15
+    assert repo.get_donation(donation.id).status is DonationStatus.AVAILABLE
+    # The refreshed card shows what's left, and the picker defaults to it.
+    text = " ".join(m.value for m in at.markdown)
+    assert "15 of 20 loaves available" in text
+    assert at.number_input(key=f"claim-qty-{donation.id}").value == 15
+
+
+def test_stale_marketplace_claim_cannot_overreserve(db_path):
+    """Another recipient reserves after this page rendered; requesting more
+    than is now left is rejected by the core, shown as feedback, not a crash."""
+    repo = _seed_minimal(db_path)
+    _add_second_recipient(repo)
+    donation = _add_available(repo)
+
+    at = _marketplace_as("Alpha Food Bank").run()
+    repo.create_claim(claim_id="c-other", donation_id=donation.id, recipient_id="r2",
+                      claimed_at=datetime.now(), quantity=15, now=datetime.now())
+    _claim_via_card(at, donation.id, 10)  # only 5 remain now
+
+    assert not at.exception
+    assert [c.recipient_id for c in repo.list_claims_for_donation(donation.id)] == ["r2"]
+    assert repo.donation_availability(donation.id).remaining == 5
+    # The picker re-defaults to what is actually left, ready for a retry.
+    assert at.number_input(key=f"claim-qty-{donation.id}").value == 5
+
+
+def test_multiple_partial_claims_and_cancel_keep_ui_quantities_correct(db_path):
+    repo = _seed_minimal(db_path)
+    _add_second_recipient(repo)
+    donation = _add_available(repo)  # 20 loaves
+
+    _claim_via_card(_marketplace_as("Alpha Food Bank").run(), donation.id, 5)
+    _claim_via_card(_marketplace_as("Beta Shelter").run(), donation.id, 7)
+    avail = repo.donation_availability(donation.id)
+    assert (avail.reserved, avail.remaining) == (12, 8)
+
+    # r1 cancels from My Claims: exactly its 5 loaves are released.
+    r1_claim = next(c for c in repo.list_claims_for_donation(donation.id)
+                    if c.recipient_id == "r1")
+    mc = _app_test("views/my_claims.py", "recipient")
+    mc.session_state["fl_recipient_name"] = "Alpha Food Bank"
+    mc.run()
+    _button(mc, f"cancel-{r1_claim.id}").click()
+    mc.run()
+    assert not mc.exception
+    avail = repo.donation_availability(donation.id)
+    assert (avail.reserved, avail.remaining) == (7, 13)
+
+    # The marketplace reflects the released quantity on the next load.
+    at = _marketplace_as("Alpha Food Bank").run()
+    assert "13 of 20 loaves available" in " ".join(m.value for m in at.markdown)
+    assert at.number_input(key=f"claim-qty-{donation.id}").value == 13
+
+
+def test_detail_dialog_shows_quantity_breakdown_and_picker(db_path):
+    """The dialog's Reserve click itself isn't driven here: AppTest reruns the
+    whole script rather than the dialog fragment, so the dialog isn't
+    re-entered. Both buttons share do_claim, covered via the card tests."""
+    repo = _seed_minimal(db_path)
+    _add_second_recipient(repo)
+    donation = _add_available(repo)
+    repo.create_claim(claim_id="c-other", donation_id=donation.id, recipient_id="r2",
+                      claimed_at=datetime.now(), quantity=6, now=datetime.now())
+
+    at = _marketplace_as("Alpha Food Bank").run()
+    _button(at, f"detail-{donation.id}").click()
+    at.run()
+    text = " ".join(m.value for m in at.markdown)
+    assert "Listed: 20 loaves" in text
+    assert "Reserved: 6 loaves" in text
+    assert "Available now: 14 loaves" in text
+    assert at.number_input(key=f"claim-qty-dialog-{donation.id}").value == 14
+    assert _button(at, f"claim-dialog-{donation.id}") is not None
+
+
+def _my_claims_text(recipient_name: str = "Alpha Food Bank") -> str:
+    at = _app_test("views/my_claims.py", "recipient")
+    at.session_state["fl_recipient_name"] = recipient_name
+    at.run()
+    assert not at.exception
+    return " ".join(m.value for m in at.markdown)
+
+
+def test_my_claims_shows_partial_claim_quantity_not_listing_total(db_path):
+    repo = _seed_minimal(db_path)
+    donation = _add_available(repo)  # 20 loaves
+    repo.create_claim(claim_id="c1", donation_id=donation.id, recipient_id="r1",
+                      claimed_at=datetime.now(), quantity=5, now=datetime.now())
+
+    text = _my_claims_text()
+    assert "Reserved: <b>5 loaves</b>" in text
+    assert "Reserved: <b>20 loaves</b>" not in text
+    assert "(listing: 20 loaves)" in text
+
+
+def test_my_claims_multiple_claims_each_show_own_quantity_and_state(db_path):
+    repo = _seed_minimal(db_path)
+    _add_second_recipient(repo)
+    donation = _add_available(repo)
+    now = datetime.now()
+    repo.create_claim(claim_id="c1", donation_id=donation.id, recipient_id="r1",
+                      claimed_at=now, quantity=3, now=now)
+    repo.create_claim(claim_id="c2", donation_id=donation.id, recipient_id="r1",
+                      claimed_at=now, quantity=4, now=now)
+    repo.create_claim(claim_id="c3", donation_id=donation.id, recipient_id="r1",
+                      claimed_at=now, quantity=2, now=now)
+    repo.confirm_collection("c3", now, now=now)
+    repo.create_claim(claim_id="c-r2", donation_id=donation.id, recipient_id="r2",
+                      claimed_at=now, quantity=9, now=now)
+
+    text = _my_claims_text()
+    assert "Reserved: <b>3 loaves</b>" in text
+    assert "Reserved: <b>4 loaves</b>" in text
+    assert "Collected: <b>2 loaves</b>" in text
+    assert "9 loaves" not in text            # another recipient's claim
+    # And Beta Shelter sees only its own 9.
+    other = _my_claims_text("Beta Shelter")
+    assert "Reserved: <b>9 loaves</b>" in other
+    assert "3 loaves" not in other
+
+
+def test_capacity_limited_recipient_can_claim_part_of_kg_listing(db_path):
+    """Recipient with ~10 kg capacity on a 20 kg listing: Claim offered, picker
+    defaults to 10, and a 5 kg reservation goes through."""
+    repo = _seed_minimal(db_path)
+    repo.add_recipient(Recipient(
+        "r-small", "Small Kitchen", RecipientType.SHELTER, Location("Central"),
+        accepted_categories={FoodCategory.BAKERY},
+        storage_capabilities={StorageRequirement.AMBIENT},
+        max_quantity_kg_equiv=10,
+        collection_days={"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+        collection_start_hour=0, collection_end_hour=24, verified=True,
+    ))
+    repo.add_donation(Donation(
+        "dn-kg", "d1", "Flour", "", FoodCategory.BAKERY, Quantity(20, Unit.KG),
+        Location("Central"), collection_deadline=datetime.now() + timedelta(days=2),
+        created_at=datetime.now(), status=DonationStatus.AVAILABLE,
+        storage=StorageRequirement.AMBIENT,
+    ))
+
+    at = _marketplace_as("Small Kitchen").run()
+    assert _button(at, "claim-dn-kg") is not None
+    assert at.number_input(key="claim-qty-dn-kg").value == 10.0
+    _claim_via_card(at, "dn-kg", 5.0)
+    assert not at.exception
+    assert [c.quantity_value for c in repo.list_claims_for_donation("dn-kg")] == [5.0]
+    assert at.number_input(key="claim-qty-dn-kg").value == 5.0   # headroom left
+
+
+def test_detail_dialog_omits_recipient_with_exhausted_capacity(db_path):
+    """The dialog's recommendations come from the claim-aware service."""
+    repo = _seed_minimal(db_path)
+    repo.add_recipient(Recipient(
+        "r-small", "Small Kitchen", RecipientType.SHELTER, Location("Central"),
+        accepted_categories={FoodCategory.BAKERY},
+        storage_capabilities={StorageRequirement.AMBIENT},
+        max_quantity_kg_equiv=10,
+        collection_days={"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+        collection_start_hour=0, collection_end_hour=24, verified=True,
+    ))
+    repo.add_donation(Donation(
+        "dn-kg", "d1", "Flour", "", FoodCategory.BAKERY, Quantity(20, Unit.KG),
+        Location("Central"), collection_deadline=datetime.now() + timedelta(days=2),
+        created_at=datetime.now(), status=DonationStatus.AVAILABLE,
+        storage=StorageRequirement.AMBIENT,
+    ))
+    repo.create_claim(claim_id="c1", donation_id="dn-kg", recipient_id="r-small",
+                      claimed_at=datetime.now(), quantity=10, now=datetime.now(),
+                      recipient_capacity=10)
+
+    at = _app_test("views/marketplace.py").run()   # donor view; dialog still ranks
+    _button(at, "detail-dn-kg").click()
+    at.run()
+    assert not at.exception
+    text = " ".join(m.value for m in at.markdown)
+    assert "Alpha Food Bank" in text          # no capacity gate -> recommended
+    assert "Small Kitchen" not in text        # used its 10 kg on this listing
+
+
+# --------------------------------------------------------------------------
+# Bug-fix regressions: Donate form best-before + reset
+# --------------------------------------------------------------------------
+def _fill_valid_donation(at, title: str = "Reset Loaves") -> None:
+    at.text_input(key="f_title").set_value(title)
+    at.text_area(key="f_desc").set_value("Day-old")
+    at.number_input(key="f_qty").set_value(12)
+    at.selectbox(key="f_unit").set_value(Unit.LOAVES)
+    at.text_input(key="f_area").set_value("Central")
+
+
+def test_best_before_date_is_selectable_stored_and_displayed(db_path):
+    from datetime import date
+
+    at = _app_test("views/donate.py").run()
+    bb_widget = at.date_input(key="f_bb")
+    assert not bb_widget.disabled          # the original bug: stuck disabled
+    assert bb_widget.value is None         # optional: empty means "none"
+
+    bb = date.today() + timedelta(days=3)
+    _fill_valid_donation(at, "Best-before Loaves")
+    bb_widget.set_value(bb)
+    _button(at, "List donation").click()
+    at.run()
+    assert not at.exception
+
+    repo = Repository(db_path)
+    created = next(d for d in repo.list_donations() if d.title == "Best-before Loaves")
+    assert created.best_before == datetime.combine(bb, datetime.min.time())
+
+    # Shown in the marketplace detail view afterwards.
+    mk = _app_test("views/marketplace.py").run()
+    _button(mk, f"detail-{created.id}").click()
+    mk.run()
+    assert f"Best before:** {created.best_before:%a %d %b}" in " ".join(
+        m.value for m in mk.markdown)
+
+
+def test_donation_without_best_before_stores_none(db_path):
+    at = _app_test("views/donate.py").run()
+    _fill_valid_donation(at, "No BB Loaves")
+    _button(at, "List donation").click()
+    at.run()
+    created = next(d for d in Repository(db_path).list_donations()
+                   if d.title == "No BB Loaves")
+    assert created.best_before is None
+
+
+def test_donate_form_resets_after_success_and_keeps_other_state(db_path):
+    from datetime import date
+
+    at = _app_test("views/donate.py").run()
+    at.session_state["unrelated_page_state"] = "keep me"
+    _fill_valid_donation(at)
+    at.date_input(key="f_bb").set_value(date.today() + timedelta(days=2))
+    _button(at, "List donation").click()
+    at.run()
+
+    assert not at.exception
+    # Fields are back to their defaults...
+    assert at.text_input(key="f_title").value == ""
+    assert at.text_area(key="f_desc").value == ""
+    assert at.number_input(key="f_qty").value == 1.0
+    assert at.date_input(key="f_bb").value is None
+    # ...with a clear success message, and unrelated state left alone.
+    assert any("Reset Loaves" in s.value for s in at.success)
+    assert at.session_state["fl_role"] == "donor"
+    assert at.session_state["unrelated_page_state"] == "keep me"
+
+    # A further run (no click) neither re-submits nor re-shows the message.
+    at.run()
+    titles = [d.title for d in Repository(db_path).list_donations()]
+    assert titles.count("Reset Loaves") == 1
+    assert not at.success
+
+
+@pytest.mark.parametrize("qty, unit, fragment", [
+    (2.5, Unit.LOAVES, "Loaves must be listed in whole units"),
+    (1.2345, Unit.KG, "at most 3 decimal places"),
+])
+def test_donate_form_rejects_unsupported_precision_and_keeps_entries(
+    db_path, qty, unit, fragment
+):
+    at = _app_test("views/donate.py").run()
+    assert at.number_input(key="f_qty").proto.format == "%.3f"
+    before = len(Repository(db_path).list_donations())
+
+    _fill_valid_donation(at, "Precise Listing")
+    at.number_input(key="f_qty").set_value(qty)
+    at.selectbox(key="f_unit").set_value(unit)
+    _button(at, "List donation").click()
+    at.run()
+
+    assert not at.exception
+    assert len(at.error) >= 1
+    assert any(fragment in m.value for m in at.markdown)       # useful message
+    assert len(Repository(db_path).list_donations()) == before  # nothing stored
+    # Every entry is kept, including the rejected amount (no silent rounding).
+    assert at.text_input(key="f_title").value == "Precise Listing"
+    assert at.text_area(key="f_desc").value == "Day-old"
+    assert at.text_input(key="f_area").value == "Central"
+    assert at.selectbox(key="f_unit").value == unit
+    assert at.number_input(key="f_qty").value == qty
+    assert not at.success
+
+
+def test_one_tap_card_claim_on_three_decimal_kg_listing(db_path):
+    repo = _seed_minimal(db_path)
+    repo.add_donation(Donation(
+        "dn-kg", "d1", "Flour", "", FoodCategory.BAKERY, Quantity(1.234, Unit.KG),
+        Location("Central"), collection_deadline=datetime.now() + timedelta(days=2),
+        created_at=datetime.now(), status=DonationStatus.AVAILABLE,
+        storage=StorageRequirement.AMBIENT,
+    ))
+    at = _marketplace_as("Alpha Food Bank").run()
+    assert at.number_input(key="claim-qty-dn-kg").value == 1.234   # default
+    _button(at, "claim-dn-kg").click()                                # one tap
+    at.run()
+
+    assert not at.exception
+    assert [c.quantity_value for c in repo.list_claims_for_donation("dn-kg")] == [1.234]
+    assert repo.donation_availability("dn-kg").remaining == 0.0
+    assert repo.get_donation("dn-kg").status is DonationStatus.RESERVED
+
+
+def test_donate_form_keeps_entries_when_validation_fails(db_path):
+    at = _app_test("views/donate.py").run()
+    before = len(Repository(db_path).list_donations())
+    _fill_valid_donation(at, "Keep My Entries")
+    at.number_input(key="f_qty").set_value(0)   # invalid -> must not reset
+    _button(at, "List donation").click()
+    at.run()
+
+    assert not at.exception
+    assert len(at.error) >= 1
+    assert len(Repository(db_path).list_donations()) == before
+    assert at.text_input(key="f_title").value == "Keep My Entries"
+    assert at.text_area(key="f_desc").value == "Day-old"
+    assert not at.success

@@ -35,6 +35,23 @@ if persona.role != "donor" or persona.donor is None:
 donor = persona.donor
 now = service.now()
 
+#: Widget keys owned by the create form — the only state cleared on success.
+_FORM_KEYS = (
+    "f_title", "f_desc", "f_cat", "f_qty", "f_unit", "f_area", "f_date", "f_time",
+    "f_storage", "f_declared", "f_allergens", "f_bb", "f_notes",
+)
+
+# Reset after a successful create. Done here, at the top of the run that
+# follows st.rerun() and *before* the widgets are instantiated, because
+# Streamlit forbids changing a widget's state once it exists in this run.
+# A failed submission never sets the flag, so the donor's entries are kept.
+created_title = st.session_state.pop("_donate_created", None)
+if created_title is not None:
+    for key in _FORM_KEYS:
+        st.session_state.pop(key, None)
+    st.success(f"Listed “{created_title}”. It is now available in the marketplace. "
+               "The form has been cleared for your next listing.")
+
 with st.form("create_donation"):
     st.markdown(f"Listing as **{donor.name}** ({donor.donor_type.value.title()}).")
 
@@ -47,8 +64,12 @@ with st.form("create_donation"):
     c1, c2, c3 = st.columns([2, 1, 1])
     category = c1.selectbox("Category", list(FoodCategory),
                             format_func=ui.category_label, key="f_cat")
+    # Display/entry precision only; the core rejects >3 decimals and
+    # fractional whole units (loaves, items, ...) whatever the browser sends.
     quantity_value = c2.number_input("Quantity", min_value=0.0, value=1.0, step=1.0,
-                                     key="f_qty")
+                                     format="%.3f", key="f_qty",
+                                     help="Up to 3 decimals for kg/litres; whole "
+                                          "numbers for items, loaves, meals and trays.")
     quantity_unit = c3.selectbox("Unit", list(Unit),
                                  format_func=lambda u: u.value, key="f_unit")
 
@@ -73,10 +94,14 @@ with st.form("create_donation"):
     allergens = st.multiselect("Allergens present", COMMON_ALLERGENS, key="f_allergens",
                                help="Leave empty with the box ticked to state 'none'.")
 
+    # Optional date: empty (None) means "not provided". Deliberately not tied to
+    # a checkbox via `disabled=` — widgets inside st.form don't rerun the
+    # script, so a checkbox could never re-enable it before submit.
     b1, b2 = st.columns(2)
-    include_bb = b1.checkbox("Add a best-before date", key="f_bb_include")
-    best_before_date = b2.date_input("Best before", value=now.date(),
-                                     key="f_bb", disabled=not include_bb)
+    best_before_date = b1.date_input("Best before (optional)", value=None, key="f_bb",
+                                     help="Leave empty if there is no best-before date.")
+    b2.caption("Best-before is a quality date set by the donor. It is separate from "
+               "the collection deadline and is not checked by FoodLoop.")
     handling_notes = st.text_area("Handling notes", key="f_notes",
                                   placeholder="Storage, reheating, packaging…")
 
@@ -84,7 +109,8 @@ with st.form("create_donation"):
 
 if submitted:
     deadline = datetime.combine(deadline_date, deadline_time)
-    best_before = datetime.combine(best_before_date, time(0, 0)) if include_bb else None
+    best_before = (datetime.combine(best_before_date, time(0, 0))
+                   if best_before_date is not None else None)
     try:
         donation = service.create_donation(
             donor_id=donor.id,
@@ -102,6 +128,7 @@ if submitted:
             best_before=best_before,
         )
         ui.flash(f"Listed “{donation.title}”. It is now available in the marketplace.")
+        st.session_state["_donate_created"] = donation.title  # triggers the reset above
         st.rerun()
     except ValidationError as exc:
         st.error("Please fix the following before listing:")

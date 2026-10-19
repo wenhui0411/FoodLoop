@@ -36,6 +36,13 @@ if not claims:
 
 st.caption(f"Showing claims for **{recipient.name}**.")
 
+_CLAIM_LABEL = {
+    ClaimStatus.RESERVED: "Reserved",
+    ClaimStatus.COLLECTED: "Collected",
+    ClaimStatus.CANCELLED: "Released",
+    ClaimStatus.EXPIRED: "Expired",
+}
+
 for claim in claims:
     donation = service.repo.get_donation(claim.donation_id)
     donor = service.repo.get_donor(donation.donor_id)
@@ -44,16 +51,18 @@ for claim in claims:
         top.markdown(
             f"{ui.category_emoji(donation.category)} **{ui.escape(donation.title)}**  \n"
             f'<span class="fl-meta">{ui.escape(donor.name)}, '
-            f"{ui.escape(donation.location.area)} · "
-            f"{ui.format_quantity(donation)}</span>  \n"
+            f"{ui.escape(donation.location.area)}</span>  \n"
             f'<span class="fl-meta">Storage: {ui.storage_label(donation.storage)} · '
             f"{ui.allergen_summary(donation)}</span>",
             unsafe_allow_html=True,
         )
         badge.markdown(ui.status_badge(donation.status), unsafe_allow_html=True)
 
+        # This claim's own amount — a donation can carry several partial claims.
         st.markdown(
-            f'<span class="fl-meta">Reserved: {ui.format_quantity(donation)}</span>',
+            f'<span class="fl-meta">{_CLAIM_LABEL[claim.status]}: '
+            f"<b>{ui.format_amount(donation, claim.quantity_value)}</b> "
+            f"(listing: {ui.format_quantity(donation)})</span>",
             unsafe_allow_html=True,
         )
         if claim.status is ClaimStatus.RESERVED:

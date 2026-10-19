@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from foodloop.eligibility import (
     can_collect_before,
     capacity_fits,
+    capacity_headroom,
     check_eligibility,
 )
 from foodloop.models import (
@@ -125,11 +126,61 @@ def test_missing_storage_capability_not_eligible(now):
     assert result.eligible is False
 
 
-def test_over_capacity_not_eligible(now):
+def test_over_capacity_request_not_eligible(now):
+    # Capacity is per donation: a 100 kg *request* exceeds a 5 kg ceiling.
     r = _recipient(max_quantity_kg_equiv=5)
     d = _donation(now, quantity=Quantity(100, Unit.KG))
-    result = check_eligibility(r, d, now=now)
+    result = check_eligibility(r, d, now=now, quantity=100)
     assert result.eligible is False
+
+
+# --- capacity is a per-donation ceiling on the requested amount ------------
+def test_small_capacity_may_partially_claim_larger_listing(now):
+    """20 kg listing, 10 kg capacity: eligible to take part of it."""
+    r = _recipient(max_quantity_kg_equiv=10)
+    d = _donation(now, quantity=Quantity(20, Unit.KG))
+    result = check_eligibility(r, d, now=now)
+    assert result.eligible is True
+    cap = next(c for c in result.checks if c.name == "capacity")
+    assert "up to ~10 kg" in cap.detail
+
+
+def test_request_within_capacity_eligible(now):
+    r = _recipient(max_quantity_kg_equiv=10)
+    d = _donation(now, quantity=Quantity(20, Unit.KG))
+    assert check_eligibility(r, d, now=now, quantity=5).eligible is True
+    assert check_eligibility(r, d, now=now, quantity=10).eligible is True  # inclusive
+
+
+def test_request_over_capacity_not_eligible_with_reason(now):
+    r = _recipient(max_quantity_kg_equiv=10)
+    d = _donation(now, quantity=Quantity(20, Unit.KG))
+    result = check_eligibility(r, d, now=now, quantity=12)
+    assert result.eligible is False
+    assert any("exceeds capacity" in reason for reason in result.reasons)
+
+
+def test_already_held_counts_toward_capacity(now):
+    r = _recipient(max_quantity_kg_equiv=10)
+    d = _donation(now, quantity=Quantity(20, Unit.KG))
+    assert check_eligibility(r, d, now=now, quantity=2, already_held=8).eligible
+    assert not check_eligibility(r, d, now=now, quantity=5, already_held=8).eligible
+    # Ceiling fully used: no further claim of any size.
+    assert not check_eligibility(r, d, now=now, already_held=10).eligible
+    assert capacity_headroom(r, d, already_held=10) == 0
+
+
+def test_capacity_headroom_is_float_safe(now):
+    r = _recipient(max_quantity_kg_equiv=0.3)
+    d = _donation(now, quantity=Quantity(1, Unit.KG))
+    assert check_eligibility(r, d, now=now, quantity=0.2, already_held=0.1).eligible
+
+
+def test_capacity_does_not_apply_to_countable_units_even_with_request(now):
+    r = _recipient(max_quantity_kg_equiv=10)
+    d = _donation(now, quantity=Quantity(500, Unit.ITEMS))
+    assert capacity_headroom(r, d) is None
+    assert check_eligibility(r, d, now=now, quantity=400).eligible is True
 
 
 def test_non_available_donation_not_eligible(now):

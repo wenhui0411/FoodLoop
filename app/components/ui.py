@@ -18,9 +18,11 @@ from foodloop.models import (
     DonationStatus,
     Donor,
     FoodCategory,
+    Quantity,
     Recipient,
     StorageRequirement,
 )
+from foodloop.reservation import DonationAvailability
 from foodloop.workflow import FoodLoopService
 
 # --------------------------------------------------------------------------
@@ -357,6 +359,19 @@ def storage_label(storage: StorageRequirement) -> str:
 
 def format_quantity(donation: Donation) -> str:
     return str(donation.quantity)
+
+
+def format_amount(donation: Donation, value: float) -> str:
+    """Format ``value`` in the donation's unit (e.g. a remaining amount)."""
+    return str(Quantity(value, donation.quantity.unit))
+
+
+def format_availability(donation: Donation, avail: DonationAvailability) -> str:
+    """'15 of 20 loaves available' once anything is held, else just the total."""
+    if avail.reserved == 0 and avail.collected == 0:
+        return format_quantity(donation)
+    left = format_amount(donation, avail.remaining).rsplit(" ", 1)[0]  # number only
+    return f"{left} of {format_quantity(donation)} available"
 
 
 def format_deadline(deadline: datetime, now: datetime) -> tuple[str, str]:

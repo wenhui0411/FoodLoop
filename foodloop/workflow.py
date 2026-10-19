@@ -17,10 +17,18 @@ from collections.abc import Callable
 from datetime import datetime
 
 from . import validation
-from .eligibility import EligibilityResult, check_eligibility
+from .eligibility import (
+    EligibilityResult,
+    capacity_check,
+    capacity_fits,
+    capacity_headroom,
+    check_eligibility,
+)
 from .errors import EligibilityError, NotFoundError
+from .matching import Recommendation, rank_recipients
 from .models import Claim, Donation, DonationStatus
 from .repository import Repository
+from .reservation import held_by_recipient
 
 
 def _default_clock() -> datetime:
@@ -72,11 +80,52 @@ class FoodLoopService:
     # ------------------------------------------------------------------
     # Eligibility
     # ------------------------------------------------------------------
-    def check_eligibility(self, donation_id: str, recipient_id: str) -> EligibilityResult:
-        """Evaluate whether a recipient may claim a donation (no side effects)."""
+    def check_eligibility(
+        self, donation_id: str, recipient_id: str, quantity: float | None = None
+    ) -> EligibilityResult:
+        """Evaluate whether a recipient may claim a donation (no side effects).
+
+        Without ``quantity`` it asks whether the recipient can take any of it;
+        with one, whether that request fits its per-donation capacity, counting
+        what it already holds from this donation.
+        """
         donation = self._repo.get_donation(donation_id)
         recipient = self._repo.get_recipient(recipient_id)
-        return check_eligibility(recipient, donation, now=self._clock())
+        return check_eligibility(
+            recipient, donation, now=self._clock(), quantity=quantity,
+            already_held=self._held_by(donation_id, recipient_id),
+        )
+
+    def claimable_quantity(self, donation_id: str, recipient_id: str) -> float:
+        """The most this recipient may reserve now: the donation's remaining
+        quantity, capped by its per-donation capacity headroom when that
+        applies. A UI uses it as the default/limit hint for a claim."""
+        donation = self._repo.get_donation(donation_id)
+        recipient = self._repo.get_recipient(recipient_id)
+        remaining = self._repo.donation_availability(donation_id).remaining
+        headroom = capacity_headroom(
+            recipient, donation, self._held_by(donation_id, recipient_id)
+        )
+        return remaining if headroom is None else min(remaining, headroom)
+
+    def recommend_recipients(self, donation_id: str) -> list[Recommendation]:
+        """Rule-based recipient ranking for a donation, aware of current
+        claims: a recipient that already holds its per-donation capacity
+        from this donation is not recommended."""
+        donation = self._repo.get_donation(donation_id)
+        claims = self._repo.list_claims_for_donation(donation_id)
+        held = {
+            rid: held_by_recipient(claims, rid)
+            for rid in {c.recipient_id for c in claims}
+        }
+        return rank_recipients(
+            donation, self._repo.list_recipients(), now=self._clock(), held=held
+        )
+
+    def _held_by(self, donation_id: str, recipient_id: str) -> float:
+        return held_by_recipient(
+            self._repo.list_claims_for_donation(donation_id), recipient_id
+        )
 
     # ------------------------------------------------------------------
     # Claim (partial-quantity reservation)
@@ -87,10 +136,12 @@ class FoodLoopService:
         """Reserve a quantity of a donation for a recipient.
 
         Eligibility (verified, category, storage, deadline window, capacity)
-        is enforced first; the requested quantity is unit-validated; then the
-        repository reserves it atomically (availability check + insert +
-        status recompute in one transaction), so concurrent reservers cannot
-        over-reserve. ``quantity=None`` reserves all remaining (whole listing),
+        is enforced first; the requested quantity is unit-validated and then
+        checked against the recipient's per-donation capacity; finally the
+        repository reserves it atomically (availability check, capacity
+        re-check, insert and status recompute in one transaction), so
+        concurrent reservers cannot over-reserve. ``quantity=None`` reserves
+        as much as is claimable (all remaining unless capacity caps it),
         preserving the existing one-tap claim UX.
         """
         result = self.check_eligibility(donation_id, recipient_id)
@@ -100,9 +151,17 @@ class FoodLoopService:
                 + "; ".join(result.reasons)
             )
         donation = self._repo.get_donation(donation_id)
+        recipient = self._repo.get_recipient(recipient_id)
         if quantity is None:
-            quantity = self._repo.donation_availability(donation_id).remaining
+            quantity = self.claimable_quantity(donation_id, recipient_id)
         quantity = validation.validate_claim_quantity(donation.quantity.unit, quantity)
+        check = capacity_check(
+            recipient, donation, quantity=quantity,
+            already_held=self._held_by(donation_id, recipient_id),
+        )
+        if not check.passed:
+            raise EligibilityError(check.detail)
+        _, comparable = capacity_fits(recipient, donation)
         return self._repo.create_claim(
             claim_id=f"clm-{uuid.uuid4().hex[:10]}",
             donation_id=donation_id,
@@ -110,6 +169,7 @@ class FoodLoopService:
             claimed_at=self._clock(),
             quantity=quantity,
             now=self._clock(),
+            recipient_capacity=recipient.max_quantity_kg_equiv if comparable else None,
         )
 
     # ------------------------------------------------------------------

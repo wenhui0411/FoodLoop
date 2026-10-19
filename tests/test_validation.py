@@ -58,6 +58,42 @@ def test_non_positive_or_nonnumeric_quantity_rejected(now, bad_qty):
     assert "quantity_value" in exc.value.errors
 
 
+# --- listing precision matches what can be claimed --------------------------
+@pytest.mark.parametrize("qty, unit", [
+    (1.234, Unit.KG),
+    (0.001, Unit.LITRES),
+    (1.2, Unit.KG),
+    (0.3, Unit.KG),           # no float-representation false rejection
+    (3, Unit.LOAVES),
+    (3.0, Unit.ITEMS),
+    ("1.230", Unit.KG),       # trailing zero is not an extra decimal
+    (100, Unit.KG),
+])
+def test_listing_quantity_precision_accepted(now, qty, unit):
+    kwargs = _valid_kwargs(now)
+    kwargs.update(quantity_value=qty, quantity_unit=unit)
+    clean = validate_donation_input(now=now, **kwargs)
+    assert clean["quantity"].value == float(qty)   # stored as stated, not rounded
+
+
+@pytest.mark.parametrize("qty, unit, fragment", [
+    (1.2345, Unit.KG, "at most 3 decimal places"),
+    (0.0004, Unit.LITRES, "at most 3 decimal places"),
+    (1e-05, Unit.KG, "at most 3 decimal places"),
+    (0.1 + 0.2, Unit.KG, "at most 3 decimal places"),
+    (2.5, Unit.LOAVES, "Loaves must be listed in whole units"),
+    (0.5, Unit.TRAYS, "Trays must be listed in whole units"),
+    (float("nan"), Unit.KG, "finite"),
+    (float("inf"), Unit.KG, "finite"),
+])
+def test_listing_quantity_precision_rejected(now, qty, unit, fragment):
+    kwargs = _valid_kwargs(now)
+    kwargs.update(quantity_value=qty, quantity_unit=unit)
+    with pytest.raises(ValidationError) as exc:
+        validate_donation_input(now=now, **kwargs)
+    assert fragment in exc.value.errors["quantity_value"]
+
+
 def test_past_deadline_rejected(now):
     kwargs = _valid_kwargs(now)
     kwargs["collection_deadline"] = now - timedelta(hours=1)

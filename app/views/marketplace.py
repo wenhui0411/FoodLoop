@@ -13,12 +13,15 @@ import streamlit as st
 from components import ui
 from components.service import get_service
 from foodloop.errors import (
+    ClaimsClosedError,
     DuplicateClaimError,
     EligibilityError,
     InvalidTransitionError,
+    OverReservationError,
+    ValidationError,
 )
-from foodloop.matching import rank_recipients
 from foodloop.models import DonationStatus, FoodCategory, StorageRequirement
+from foodloop.validation import is_whole_unit
 
 service = get_service()
 persona = ui.current_persona(service)
@@ -34,16 +37,47 @@ now = service.now()
 _acting_recipient = persona.recipient if persona.role == "recipient" else None
 
 
-def do_claim(donation_id: str) -> None:
-    """Claim a donation for the active recipient persona, with feedback."""
+def do_claim(donation_id: str, quantity: float) -> None:
+    """Reserve ``quantity`` of a donation for the active recipient persona.
+
+    Unit precision and the ``<= remaining`` limit are enforced by the service
+    and repository (atomically), so a stale page or a concurrent reserver
+    gets a clear message here rather than an over-reservation.
+    """
     if _acting_recipient is None:
         return
     try:
-        service.claim_donation(donation_id, _acting_recipient.id)
-        ui.flash("Donation claimed. Confirm collection on the ‘My Claims’ page.")
-    except (EligibilityError, DuplicateClaimError, InvalidTransitionError) as exc:
+        claim = service.claim_donation(donation_id, _acting_recipient.id, quantity)
+        donation = service.repo.get_donation(donation_id)
+        ui.flash(f"Reserved {ui.format_amount(donation, claim.quantity_value)}. "
+                 "Show your pickup code on the ‘My Claims’ page.")
+    except ValidationError as exc:
+        ui.flash(" ".join(exc.errors.values()), icon="⚠️")
+    except (EligibilityError, DuplicateClaimError, InvalidTransitionError,
+            OverReservationError, ClaimsClosedError) as exc:
         ui.flash(str(exc), icon="⚠️")
+    # Keyed widgets keep their last value across reruns; drop it so the picker
+    # re-defaults to the freshly computed remaining quantity.
+    for key in (f"claim-qty-{donation_id}", f"claim-qty-dialog-{donation_id}"):
+        st.session_state.pop(key, None)
     st.rerun()
+
+
+def claim_quantity_input(d, key: str) -> float:
+    """Quantity picker for a claim, defaulting to the most this recipient may
+    take (remaining, capped by its capacity — computed by the service).
+
+    No ``max_value`` on purpose: if someone else reserves in the meantime the
+    request must still reach the service and be rejected with a clear
+    message, not trip a widget bounds error on rerun.
+    """
+    default = service.claimable_quantity(d.id, _acting_recipient.id)
+    unit = d.quantity.unit
+    label = f"Quantity to reserve ({unit.value})"
+    if is_whole_unit(unit) and float(default).is_integer():
+        return st.number_input(label, min_value=1, value=int(default), step=1, key=key)
+    return st.number_input(label, min_value=0.0, value=float(default), step=0.1,
+                           format="%.3f", key=key)
 
 
 # --------------------------------------------------------------------------
@@ -52,6 +86,7 @@ def do_claim(donation_id: str) -> None:
 @st.dialog("Donation details", width="large")
 def show_detail(donation_id: str) -> None:
     d = service.repo.get_donation(donation_id)
+    avail = service.repo.donation_availability(d.id)
     donor = donors.get(d.donor_id) or service.repo.get_donor(d.donor_id)
 
     head, badge = st.columns([4, 1])
@@ -70,7 +105,12 @@ def show_detail(donation_id: str) -> None:
             unsafe_allow_html=True,
         )
         st.markdown("**Quantity**")
-        st.markdown(ui.format_quantity(d))
+        st.markdown(
+            f"Listed: {ui.format_quantity(d)}  \n"
+            f"Reserved: {ui.format_amount(d, avail.reserved)} · "
+            f"Collected: {ui.format_amount(d, avail.collected)}  \n"
+            f"**Available now: {ui.format_amount(d, avail.remaining)}**"
+        )
         st.markdown("**Category**")
         st.markdown(ui.category_label(d.category))
     with b:
@@ -105,7 +145,7 @@ def show_detail(donation_id: str) -> None:
             "data they provided. It is not an AI prediction, not a food-safety "
             "judgement, and not a guarantee that collection will happen."
         )
-        recs = rank_recipients(d, service.repo.list_recipients(), now=now)
+        recs = service.recommend_recipients(d.id)
         if not recs:
             st.info("No eligible recipients to recommend for this donation right now.")
         else:
@@ -141,9 +181,10 @@ def show_detail(donation_id: str) -> None:
         if d.status is not DonationStatus.AVAILABLE:
             st.info(f"This donation is '{d.status.value}' and cannot be claimed.")
         elif result.eligible:
-            if st.button("Claim this donation", key=f"claim-dialog-{d.id}",
+            qty = claim_quantity_input(d, key=f"claim-qty-dialog-{d.id}")
+            if st.button("Reserve this quantity", key=f"claim-dialog-{d.id}",
                          type="primary", width="stretch"):
-                do_claim(d.id)
+                do_claim(d.id, qty)
         else:
             st.warning("Your organisation is not eligible to claim this donation "
                        "(see the ❌ items above).")
@@ -228,6 +269,7 @@ else:
         cols = st.columns(per_row)
         for col, d in zip(cols, results[start:start + per_row]):
             donor = donors.get(d.donor_id)
+            avail = service.repo.donation_availability(d.id)
             text, css = ui.format_deadline(d.collection_deadline, now)
             with col:
                 card = st.container(border=True)
@@ -243,7 +285,7 @@ else:
                         f'<div class="fl-meta">'
                         f'{ui.escape(donor.name) if donor else "—"} · '
                         f"{ui.escape(d.location.area)}</div>"
-                        f'<div class="fl-meta">{ui.format_quantity(d)} · '
+                        f'<div class="fl-meta">{ui.format_availability(d, avail)} · '
                         f"{ui.category_label(d.category)}</div>"
                         f'<div class="fl-meta">⏰ Collect '
                         f'<span class="{css}">{text}</span></div>',
@@ -264,8 +306,9 @@ else:
                             d.id, _acting_recipient.id
                         ).eligible
                         if eligible:
+                            qty = claim_quantity_input(d, key=f"claim-qty-{d.id}")
                             if st.button("Claim", key=f"claim-{d.id}",
                                          type="primary", width="stretch"):
-                                do_claim(d.id)
+                                do_claim(d.id, qty)
                         else:
                             st.caption("Not eligible — see details")

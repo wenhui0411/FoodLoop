@@ -14,6 +14,7 @@ raises :class:`~foodloop.errors.ValidationError` carrying a
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import TypeVar
 
@@ -38,6 +39,12 @@ _INTEGER_UNITS: frozenset[Unit] = frozenset(
 _DECIMAL_PLACES = 3
 
 _E = TypeVar("_E", bound=StrEnum)
+
+
+def is_whole_unit(unit: Unit) -> bool:
+    """Whether ``unit`` is claimed in whole pieces only (lets a UI choose an
+    integer input without duplicating the rule in :func:`validate_claim_quantity`)."""
+    return unit in _INTEGER_UNITS
 
 
 def validate_claim_quantity(unit: Unit, value: object) -> float:
@@ -65,6 +72,24 @@ def validate_claim_quantity(unit: Unit, value: object) -> float:
             {"quantity": f"{unit.value.title()} must be claimed in whole units."}
         )
     return round(qty, _DECIMAL_PLACES)
+
+
+def _listing_precision_error(unit: Unit, qty: float) -> str | None:
+    """Why a positive listing quantity has unsupported precision, or None.
+
+    Uses ``Decimal(str(qty))`` — the shortest round-trip text of the float —
+    so a typed ``1.234`` is checked as exactly 1.234, free of binary noise.
+    """
+    value = Decimal(str(qty))
+    if not value.is_finite():
+        return "Quantity must be a finite number."
+    if is_whole_unit(unit):
+        if value != value.to_integral_value():
+            return f"{unit.value.title()} must be listed in whole units."
+        return None
+    if value.normalize().as_tuple().exponent < -_DECIMAL_PLACES:
+        return f"Quantity can have at most {_DECIMAL_PLACES} decimal places."
+    return None
 
 
 def _coerce_enum(
@@ -143,6 +168,14 @@ def validate_donation_input(
             errors["quantity_value"] = "Quantity must be greater than zero."
     except (TypeError, ValueError):
         errors["quantity_value"] = "Quantity must be a number."
+
+    # Precision must match what can later be claimed (validate_claim_quantity),
+    # or part of the listing could never be reserved. Rejected, never rounded:
+    # the donor's stated amount is not changed silently.
+    if qty is not None and unit_val is not None and "quantity_value" not in errors:
+        message = _listing_precision_error(unit_val, qty)
+        if message:
+            errors["quantity_value"] = message
 
     # Collection deadline must be a datetime strictly in the future. The
     # deadline is purely about *when food can be collected* — it is not a

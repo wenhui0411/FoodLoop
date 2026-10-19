@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from decimal import Decimal
 
 from .models import (
     WEEKDAYS,
@@ -80,13 +81,14 @@ def can_collect_before(
 def capacity_fits(
     recipient: Recipient, donation: Donation
 ) -> tuple[bool, bool]:
-    """Return ``(fits, comparable)`` for the recipient's capacity.
+    """Return ``(fits, comparable)`` for taking the *whole listing*.
 
     Capacity is a rough kg-equivalent ceiling. We only compare it when the
     donation is itself measured in kg; for countable units (loaves, items,
     trays, ...) a kg comparison would require assumptions we cannot justify,
     so we report ``comparable=False`` and do not treat it as a hard failure.
-    Matching (M4) can still use this as a soft signal.
+    Used by matching as a soft signal; the hard claim gate is
+    :func:`capacity_check`, which judges the requested quantity.
     """
     from .models import Unit
 
@@ -97,10 +99,62 @@ def capacity_fits(
     return True, False
 
 
+def capacity_headroom(
+    recipient: Recipient, donation: Donation, already_held: float = 0.0
+) -> float | None:
+    """How much more (kg) the recipient may take from this donation, or None
+    when capacity does not apply (no ceiling, or a non-kg unit).
+
+    Capacity is a ceiling *per donation* (see ``Recipient``): what this
+    recipient already holds from the same donation (reserved or collected)
+    counts against it; other recipients' claims and other donations do not.
+    """
+    _, comparable = capacity_fits(recipient, donation)
+    if not comparable:
+        return None
+    left = Decimal(str(recipient.max_quantity_kg_equiv)) - Decimal(str(already_held))
+    return float(max(left, Decimal(0)))
+
+
+def capacity_check(
+    recipient: Recipient, donation: Donation, *,
+    quantity: float | None = None, already_held: float = 0.0,
+) -> Check:
+    """The capacity criterion. With ``quantity=None`` it asks whether the
+    recipient can take *any* of the listing (partial claims allowed); with a
+    quantity it asks whether that request fits the remaining headroom."""
+    headroom = capacity_headroom(recipient, donation, already_held)
+    if headroom is None:
+        return Check("capacity", True,
+                     "Capacity not directly comparable for this unit (not a blocker).")
+    cap = recipient.max_quantity_kg_equiv
+    if quantity is None:
+        fits = headroom > 0
+        return Check(
+            "capacity", fits,
+            f"Can take up to ~{headroom:g} kg of this listing "
+            f"(capacity ~{cap:g} kg per donation)." if fits
+            else f"Already holds its ~{cap:g} kg capacity from this listing.",
+        )
+    fits = Decimal(str(quantity)) <= Decimal(str(headroom))
+    return Check(
+        "capacity", fits,
+        f"Request of {quantity:g} kg is within capacity (~{cap:g} kg per donation)."
+        if fits
+        else f"Request of {quantity:g} kg exceeds capacity: up to ~{headroom:g} kg "
+             f"more of ~{cap:g} kg per donation.",
+    )
+
+
 def check_eligibility(
-    recipient: Recipient, donation: Donation, *, now: datetime
+    recipient: Recipient, donation: Donation, *, now: datetime,
+    quantity: float | None = None, already_held: float = 0.0,
 ) -> EligibilityResult:
-    """Run every hard eligibility check and aggregate the result."""
+    """Run every hard eligibility check and aggregate the result.
+
+    ``quantity`` / ``already_held`` only affect the capacity criterion (see
+    :func:`capacity_check`); omitted, it asks whether any amount can be taken.
+    """
     checks: list[Check] = []
 
     # 1. Donation must be open to claims.
@@ -142,19 +196,10 @@ def check_eligibility(
         else "Has no collection window before the deadline.",
     ))
 
-    # 6. Capacity — only enforced when comparable (see capacity_fits).
-    fits, comparable = capacity_fits(recipient, donation)
-    if comparable:
-        checks.append(Check(
-            "capacity", fits,
-            f"Within capacity (~{recipient.max_quantity_kg_equiv:g} kg)." if fits
-            else f"Exceeds capacity (~{recipient.max_quantity_kg_equiv:g} kg).",
-        ))
-    else:
-        checks.append(Check(
-            "capacity", True,
-            "Capacity not directly comparable for this unit (not a blocker).",
-        ))
+    # 6. Capacity — only enforced when comparable (see capacity_check).
+    checks.append(capacity_check(
+        recipient, donation, quantity=quantity, already_held=already_held,
+    ))
 
     eligible = all(c.passed for c in checks)
     return EligibilityResult(eligible=eligible, checks=checks)

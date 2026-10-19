@@ -184,6 +184,29 @@ def test_capacity_scored_only_for_comparable_units(now):
     assert cap.available is False
 
 
+def test_smaller_capacity_recipient_still_recommended_for_partial(now):
+    """With partial claims, a 10 kg-capacity org is eligible for a 20 kg
+    listing; it scores no capacity headroom and says so honestly."""
+    donation = _donation(now, quantity=Quantity(20, Unit.KG))
+    big = _recipient("big", max_quantity_kg_equiv=100)
+    small = _recipient("small", max_quantity_kg_equiv=10)
+    recs = rank_recipients(donation, [big, small], now=now)
+    assert [r.recipient.id for r in recs] == ["big", "small"]
+    cap = next(f for f in recs[1].factors if f.name == "capacity")
+    assert cap.score == 0.0 and "partial" in cap.detail
+
+
+def test_held_mapping_excludes_exhausted_and_defaults_to_nothing_held(now):
+    donation = _donation(now, quantity=Quantity(20, Unit.KG))
+    a = _recipient("a", max_quantity_kg_equiv=10)
+    b = _recipient("b", max_quantity_kg_equiv=10)
+    default = rank_recipients(donation, [a, b], now=now)
+    assert {r.recipient.id for r in default} == {"a", "b"}   # omitted -> unchanged
+    held = rank_recipients(donation, [a, b], now=now, held={"a": 10, "b": 3})
+    assert [r.recipient.id for r in held] == ["b"]
+    assert held[0].score == next(r.score for r in default if r.recipient.id == "b")
+
+
 def test_more_headroom_ranks_higher_for_kg_donation(now):
     donation = _donation(now, quantity=Quantity(10, Unit.KG))
     roomy = _recipient("roomy", max_quantity_kg_equiv=100)   # lots of headroom

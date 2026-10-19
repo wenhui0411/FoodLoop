@@ -39,6 +39,7 @@ from pathlib import Path
 
 from .errors import (
     ClaimsClosedError,
+    EligibilityError,
     InvalidTransitionError,
     MigrationError,
     NotFoundError,
@@ -600,7 +601,7 @@ class Repository:
     def create_claim(
         self, *, claim_id: str, donation_id: str, recipient_id: str,
         claimed_at: datetime, quantity: float | None = None,
-        now: datetime | None = None,
+        now: datetime | None = None, recipient_capacity: float | None = None,
     ) -> Claim:
         """Reserve a quantity of a donation, atomically.
 
@@ -610,7 +611,9 @@ class Repository:
         and sees the updated sum. ``quantity=None`` reserves all remaining
         (whole-listing claim). Raises on a closed donation, a passed deadline,
         or a request exceeding the remaining quantity — in which case nothing
-        is written.
+        is written. When ``recipient_capacity`` is given (the service passes it
+        only where capacity applies), the recipient's held + requested amount
+        on this donation is re-checked against it in the same transaction.
         """
         now = now or datetime.now()
         with self._write_txn() as conn:
@@ -631,11 +634,15 @@ class Repository:
                     "longer be claimed."
                 )
             total = Decimal(str(drow["quantity_value"]))
-            consumed = Decimal(str(conn.execute(
-                "SELECT COALESCE(SUM(quantity_value), 0) FROM claims "
+            # Sum per row via Decimal(str(...)), as reservation.py does — SQLite's
+            # SUM() over REALs carries binary drift (0.1 + 0.2 != 0.3), which
+            # would wrongly reject claiming an exact remainder.
+            active = conn.execute(
+                "SELECT recipient_id, quantity_value FROM claims "
                 "WHERE donation_id = ? AND status IN (?, ?)",
                 (donation_id, ClaimStatus.RESERVED.value, ClaimStatus.COLLECTED.value),
-            ).fetchone()[0]))
+            ).fetchall()
+            consumed = sum((Decimal(str(r["quantity_value"])) for r in active), Decimal(0))
             remaining = total - consumed
             qty = remaining if quantity is None else Decimal(str(quantity))
             if qty <= 0:
@@ -646,6 +653,17 @@ class Repository:
                 raise OverReservationError(
                     f"Requested {qty} exceeds the remaining {remaining}."
                 )
+            if recipient_capacity is not None:
+                held = sum(
+                    (Decimal(str(r["quantity_value"])) for r in active
+                     if r["recipient_id"] == recipient_id),
+                    Decimal(0),
+                )
+                if held + qty > Decimal(str(recipient_capacity)):
+                    raise EligibilityError(
+                        f"Requested {qty} would exceed the recipient's capacity "
+                        f"of {recipient_capacity:g} per donation (already holds {held})."
+                    )
             code = self._unique_pickup_code(conn)
             conn.execute(
                 """INSERT INTO claims

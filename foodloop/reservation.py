@@ -62,6 +62,19 @@ def available_quantity(total: float, claims: Iterable[Claim]) -> DonationAvailab
     )
 
 
+def held_by_recipient(claims: Iterable[Claim], recipient_id: str) -> float:
+    """Quantity one recipient holds from a donation: its RESERVED plus
+    COLLECTED claims (cancelled/expired release theirs). Counts toward that
+    recipient's per-donation capacity ceiling."""
+    held = Decimal(0)
+    for c in claims:
+        if c.recipient_id == recipient_id and c.status in (
+            ClaimStatus.RESERVED, ClaimStatus.COLLECTED
+        ):
+            held += _dec(c.quantity_value)
+    return float(held)
+
+
 def derive_donation_status(
     total: float,
     claims: Iterable[Claim],

@@ -37,6 +37,7 @@ are renormalised over those. Defaults (documented, not tuned to look clever):
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
@@ -170,8 +171,14 @@ def _capacity_factor(recipient: Recipient, donation: Donation) -> RankingFactor:
         )
     cap = recipient.max_quantity_kg_equiv
     qty = donation.quantity.value
-    # Eligibility guarantees qty <= cap here; reward spare headroom.
+    # Reward spare headroom for taking the whole listing. A smaller recipient
+    # stays eligible (partial claims) but scores 0 here.
     headroom = max(0.0, min(1.0, 1.0 - qty / cap)) if cap > 0 else 0.0
+    if not fits:
+        return RankingFactor(
+            "capacity", True, 0.0, weight,
+            f"Could take ~{cap:g} of ~{qty:g} kg (partial collection; no headroom).",
+        )
     return RankingFactor(
         "capacity", True, headroom, weight,
         f"Needs ~{qty:g} of ~{cap:g} kg capacity "
@@ -205,17 +212,24 @@ def score_recipient(
 
 
 def rank_recipients(
-    donation: Donation, recipients: list[Recipient], *, now: datetime
+    donation: Donation, recipients: list[Recipient], *, now: datetime,
+    held: Mapping[str, float] | None = None,
 ) -> list[Recommendation]:
     """Return eligible recipients, ranked best-first, with explanations.
 
     Eligibility (the hard gate in :mod:`foodloop.eligibility`) is applied
-    first; only recipients that pass are scored. Ordering is deterministic:
-    by score descending, then recipient name ascending to break ties.
+    first; only recipients that pass are scored. ``held`` maps recipient id
+    to the quantity it already holds from this donation, so one that has
+    used up its per-donation capacity is excluded (omitted: nothing held).
+    Ordering is deterministic: by score descending, then recipient name
+    ascending to break ties. Scores themselves do not depend on ``held``.
     """
+    held = held or {}
     eligible = [
         r for r in recipients
-        if check_eligibility(r, donation, now=now).eligible
+        if check_eligibility(
+            r, donation, now=now, already_held=held.get(r.id, 0.0)
+        ).eligible
     ]
     recs = [score_recipient(r, donation, now) for r in eligible]
     recs.sort(key=lambda rec: (-rec.score, rec.recipient.name))
