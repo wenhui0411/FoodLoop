@@ -220,6 +220,8 @@ def test_recipient_sees_pickup_code_and_cannot_self_confirm(db_path):
     # The code is shown to the recipient...
     codeblocks = " ".join(getattr(c, "value", "") for c in at.code)
     assert claim.pickup_code in codeblocks
+    # ...alongside a scannable QR code of the same value...
+    assert len(at.get("image")) == 1
     # ...and there is no recipient self-confirm button (donor confirms by code).
     assert _button(at, "confirm-c1") is None
 
@@ -866,3 +868,140 @@ def test_donate_form_keeps_entries_when_validation_fails(db_path):
     assert at.text_input(key="f_title").value == "Keep My Entries"
     assert at.text_area(key="f_desc").value == "Day-old"
     assert not at.success
+
+
+# --------------------------------------------------------------------------
+# Demo-workflow polish ported from the React prototype: pickups first in My
+# Claims, who-claimed-what for donors, eligibility filter, nearest sort, and
+# the Home shortcut. All of it reads existing service/impact results.
+# --------------------------------------------------------------------------
+def _page_text(at) -> str:
+    return " ".join(str(getattr(e, "value", "")) for e in (*at.markdown, *at.caption,
+                                                           *at.info, *at.success))
+
+
+def test_my_claims_puts_ready_pickups_first_and_filters_history(db_path):
+    repo = _seed_minimal(db_path)
+    _add_available(repo, "dn1")
+    _add_available(repo, "dn2")
+    now = datetime.now()
+    waiting = repo.create_claim(claim_id="c1", donation_id="dn1", recipient_id="r1",
+                                claimed_at=now, quantity=3, now=now)
+    done = repo.create_claim(claim_id="c2", donation_id="dn2", recipient_id="r1",
+                             claimed_at=now, quantity=2, now=now)
+    repo.confirm_collection(done.id, now, now=now)
+
+    at = _app_test("views/my_claims.py", "recipient").run()
+    assert not at.exception
+    text = _page_text(at)
+    assert "Ready for pickup (1)" in text and "History (1)" in text
+    codes = [c.value for c in at.code]
+    assert codes == [waiting.pickup_code]                 # only the open claim's code
+    assert _button(at, "cancel-c1") is not None and _button(at, "cancel-c2") is None
+
+    from foodloop.models import ClaimStatus
+    at.selectbox(key="mc_status").set_value(ClaimStatus.EXPIRED).run()
+    assert "Collected: <b>2 loaves</b>" not in _page_text(at)
+
+
+def test_my_listings_shows_waiting_pickups_and_claimants_without_codes(db_path):
+    repo = _seed_minimal(db_path)
+    _add_available(repo, "dn1")
+    now = datetime.now()
+    claim = repo.create_claim(claim_id="c1", donation_id="dn1", recipient_id="r1",
+                              claimed_at=now, quantity=5, now=now)
+
+    at = _app_test("views/my_listings.py", "donor").run()
+    assert not at.exception
+    text = _page_text(at)
+    assert "1 pickup waiting" in text
+    assert "Alpha Food Bank — 5 loaves" in text and "Ready for pickup" in text
+    assert "15 of 20 loaves available" in text
+    assert claim.pickup_code not in text                  # donor never sees the code
+    assert not at.code
+    assert len(at.dataframe) == 1                         # claim history tab
+
+
+def test_marketplace_hides_ineligible_food_by_default_and_explains_why(db_path):
+    repo = _seed_minimal(db_path)
+    _add_available(repo, "dn1")
+    repo.add_donation(Donation(
+        "dn-milk", "d1", "Milk", "", FoodCategory.DAIRY, Quantity(10, Unit.LITRES),
+        Location("Central"), collection_deadline=datetime.now() + timedelta(days=2),
+        created_at=datetime.now(), status=DonationStatus.AVAILABLE,
+        storage=StorageRequirement.AMBIENT,
+    ))
+
+    at = _app_test("views/marketplace.py", "recipient").run()
+    assert not at.exception
+    assert _button(at, "detail-dn1") is not None
+    assert _button(at, "detail-dn-milk") is None          # r1 does not accept dairy
+
+    at.toggle(key="mk_eligible_only").set_value(False).run()
+    assert _button(at, "detail-dn-milk") is not None
+    assert _button(at, "claim-dn-milk") is None
+    assert "Not eligible: Does not accept dairy." in _page_text(at)
+
+
+def test_marketplace_nearest_sort_uses_real_coordinates(db_path):
+    repo = Repository(db_path)
+    repo.add_donor(Donor("d1", "Alpha Bakery", DonorType.BAKERY, Location("Central")))
+    repo.add_recipient(Recipient(
+        "r1", "Alpha Food Bank", RecipientType.FOOD_BANK, Location("Here", 0.0, 0.0),
+        accepted_categories={FoodCategory.BAKERY},
+        storage_capabilities={StorageRequirement.AMBIENT},
+        collection_days={"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+        collection_start_hour=0, collection_end_hour=24, verified=True,
+    ))
+    _add_available(repo, "dn-far", Location("Far", 0.5, 0.0))
+    _add_available(repo, "dn-near", Location("Near", 0.05, 0.0))
+    _add_available(repo, "dn-unknown", Location("Unknown"))
+
+    at = _app_test("views/marketplace.py", "recipient").run()
+    at.selectbox(key="mk_sort").set_value("Nearest").run()
+    assert not at.exception
+    order = [b.key for b in at.button if (b.key or "").startswith("detail-")]
+    assert order == ["detail-dn-near", "detail-dn-far", "detail-dn-unknown"]
+    assert "📍 5.6 km" in _page_text(at)
+
+
+def test_home_links_recipient_to_waiting_pickup(db_path):
+    from streamlit.testing.v1 import AppTest
+
+    repo = _seed_minimal(db_path)
+    _add_available(repo, "dn1")
+    now = datetime.now()
+    repo.create_claim(claim_id="c1", donation_id="dn1", recipient_id="r1",
+                      claimed_at=now, quantity=1, now=now)
+    at = AppTest.from_file(str(_APP / "Home.py"), default_timeout=60)
+    at.session_state["fl_role"] = "recipient"
+    at.run()
+    assert not at.exception
+    labels = [e.proto.label for e in at.get("page_link")]
+    assert "1 pickup waiting — show your code from My Claims" in labels
+
+
+def test_handover_result_is_shown_inline(db_path):
+    # (Field clearing is clear_on_submit, applied by the browser frontend;
+    # AppTest re-sends its own widget value, so that is checked in-browser.)
+    repo = _seed_minimal(db_path)
+    _add_available(repo, "dn1")
+    now = datetime.now()
+    claim = repo.create_claim(claim_id="c1", donation_id="dn1", recipient_id="r1",
+                              claimed_at=now, quantity=5, now=now)
+
+    at = _app_test("views/my_listings.py", "donor").run()
+    at.text_input(key="handover_code").set_value("ZZZZZZ")
+    _button(at, "Confirm handover").click()
+    at.run()
+    assert [e.value for e in at.error] == ["Not confirmed: No reserved pickup matches that code."]
+
+    at.text_input(key="handover_code").set_value(claim.pickup_code)
+    _button(at, "Confirm handover").click()
+    at.run()
+    assert not at.exception and not at.error
+    assert [e.value for e in at.success] == [
+        f"Handover confirmed ({claim.pickup_code}): 5 loaves of “Fresh loaves” collected "
+        "by Alpha Food Bank. It now counts toward impact."
+    ]
+    assert repo.list_claims_for_donation("dn1")[0].status.value == "collected"

@@ -20,6 +20,7 @@ from foodloop.errors import (
     OverReservationError,
     ValidationError,
 )
+from foodloop.matching import haversine_km
 from foodloop.models import DonationStatus, FoodCategory, StorageRequirement
 from foodloop.validation import is_whole_unit
 
@@ -209,7 +210,9 @@ with st.container(border=True):
         key="mk_category",
     )
     sort_by = f3.selectbox(
-        "Sort by", ["Deadline (soonest)", "Newest", "Largest quantity"],
+        "Sort by", ["Deadline (soonest)", "Nearest", "Newest", "Largest quantity"]
+        if _acting_recipient is not None else
+        ["Deadline (soonest)", "Newest", "Largest quantity"],
         key="mk_sort",
     )
     g1, g2 = st.columns([2, 2])
@@ -226,12 +229,35 @@ with st.container(border=True):
         format_func=ui.storage_label,
         key="mk_storage",
     )
+    eligible_only = False
+    if _acting_recipient is not None:
+        eligible_only = st.toggle(
+            f"Only food {_acting_recipient.name} can claim", value=True,
+            key="mk_eligible_only",
+            help="Uses the same rule-based checks as claiming: verification, "
+                 "category, storage, collection window and capacity.",
+        )
+
+# Eligibility for the acting recipient, computed once per listing by the
+# service (the same checks claim_donation enforces).
+eligibility = (
+    {d.id: service.check_eligibility(d.id, _acting_recipient.id) for d in all_donations}
+    if _acting_recipient is not None else {}
+)
+
+
+def _distance(d) -> float | None:
+    if _acting_recipient is None:
+        return None
+    return haversine_km(_acting_recipient.location, d.location)
 
 
 # --------------------------------------------------------------------------
 # Apply filters + sorting
 # --------------------------------------------------------------------------
 def _matches(d) -> bool:
+    if eligible_only and not eligibility[d.id].eligible:
+        return False
     if statuses and d.status not in statuses:
         return False
     if categories and d.category not in categories:
@@ -252,14 +278,20 @@ results = [d for d in all_donations if _matches(d)]
 
 if sort_by == "Deadline (soonest)":
     results.sort(key=lambda d: d.collection_deadline)
+elif sort_by == "Nearest":  # listings without coordinates go last, never guessed
+    results.sort(key=lambda d: (_distance(d) is None, _distance(d) or 0.0))
 elif sort_by == "Newest":
     results.sort(key=lambda d: d.created_at, reverse=True)
 else:  # Largest quantity (within-unit only; see caption)
     results.sort(key=lambda d: d.quantity.value, reverse=True)
 
-st.caption(f"Showing **{len(results)}** of {len(all_donations)} listings.")
+st.caption(f"Showing **{len(results)}** of {len(all_donations)} listings"
+           + (" that your organisation can claim." if eligible_only else "."))
 if sort_by == "Largest quantity":
     st.caption("Quantity sort compares raw values; units are not converted.")
+elif sort_by == "Nearest":
+    st.caption("Distance is shown only where a listing and your organisation both have "
+               "coordinates; listings without them are listed last, never guessed.")
 
 
 # --------------------------------------------------------------------------
@@ -267,7 +299,9 @@ if sort_by == "Largest quantity":
 # --------------------------------------------------------------------------
 if not results:
     st.info("No donations match your filters. Try clearing the search or widening "
-            "the status/category selection.")
+            "the status/category selection"
+            + (", or turn off “Only food … can claim” to see everything." if eligible_only
+               else "."))
 else:
     per_row = 3
     for start in range(0, len(results), per_row):
@@ -276,6 +310,8 @@ else:
             donor = donors.get(d.donor_id)
             avail = service.repo.donation_availability(d.id)
             text, css = ui.format_deadline(d.collection_deadline, now)
+            km = _distance(d)
+            where = ui.escape(d.location.area) + (f" · 📍 {km:.1f} km" if km is not None else "")
             with col:
                 card = st.container(border=True)
                 with card:
@@ -289,7 +325,7 @@ else:
                     st.markdown(
                         f'<div class="fl-meta">'
                         f'{ui.escape(donor.name) if donor else "—"} · '
-                        f"{ui.escape(d.location.area)}</div>"
+                        f"{where}</div>"
                         f'<div class="fl-meta">{ui.format_availability(d, avail)} · '
                         f"{ui.category_label(d.category)}</div>"
                         f'<div class="fl-meta">⏰ Collect '
@@ -307,13 +343,14 @@ else:
 
                     # Inline claim for a recipient persona on available listings.
                     if _acting_recipient is not None and d.status is DonationStatus.AVAILABLE:
-                        eligible = service.check_eligibility(
-                            d.id, _acting_recipient.id
-                        ).eligible
-                        if eligible:
+                        result = eligibility[d.id]
+                        if result.eligible:
                             qty = claim_quantity_input(d, key=f"claim-qty-{d.id}")
                             if st.button("Claim", key=f"claim-{d.id}",
                                          type="primary", width="stretch"):
                                 do_claim(d.id, qty)
                         else:
-                            st.caption("Not eligible — see details")
+                            more = len(result.reasons) - 1
+                            st.caption(f"❌ Not eligible: {result.reasons[0]}"
+                                       + (f" (+{more} more)" if more > 0 else "")
+                                       + " — see details")

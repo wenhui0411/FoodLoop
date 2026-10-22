@@ -13,7 +13,7 @@ import streamlit as st
 
 from components import ui
 from components.service import get_service
-from foodloop import insights
+from foodloop import impact, insights
 
 service = get_service()
 persona = ui.current_persona(service)
@@ -32,6 +32,12 @@ if persona.role == "donor":
         "before it goes to waste.",
     )
     st.page_link("views/donate.py", label="List surplus food", icon="➕")
+    if persona.donor is not None:
+        waiting = impact.donor_impact(service.repo, persona.donor.id).reserved_claims
+        if waiting:
+            st.page_link("views/my_listings.py", icon="✅",
+                         label=f"{waiting} pickup{'s' if waiting != 1 else ''} waiting "
+                               "— confirm the recipient's code in My Listings")
 else:
     ui.hero(
         "FoodLoop · Recipient",
@@ -40,6 +46,12 @@ else:
         "use in your community.",
     )
     st.page_link("views/marketplace.py", label="Browse the marketplace", icon="🛒")
+    if persona.recipient is not None:
+        waiting = impact.recipient_impact(service.repo, persona.recipient.id).active_claims
+        if waiting:
+            st.page_link("views/my_claims.py", icon="🎟️",
+                         label=f"{waiting} pickup{'s' if waiting != 1 else ''} waiting "
+                               "— show your code from My Claims")
 
 # --------------------------------------------------------------------------
 # Township pulse (community-wide, demo data)

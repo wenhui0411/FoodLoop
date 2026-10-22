@@ -7,13 +7,16 @@ true* lives in the core; this module only decides *how it looks*.
 from __future__ import annotations
 
 import html
+import io
 import os
 from dataclasses import dataclass
 from datetime import datetime
 
+import segno
 import streamlit as st
 
 from foodloop.models import (
+    ClaimStatus,
     Donation,
     DonationStatus,
     Donor,
@@ -164,6 +167,12 @@ def _inject_css() -> None:
           .fl-deadline-urgent {{ color:#9A2A2A; font-weight:700; }}
           .fl-deadline-soon {{ color:#8A5A00; font-weight:700; }}
           .fl-deadline-ok {{ color:#1E7A43; font-weight:700; }}
+
+          /* ---- Pickup code: large and legible when shown at handover --- */
+          [class*="st-key-fl_pickup_"] code {{
+              font-size: 2rem !important; font-weight: 800; letter-spacing: .22em;
+              color: {FOREST_DARK};
+          }}
 
           /* ---- Mobile bottom navigation -------------------------------- */
           /* Scoped to the keyed container (st-key-*), a documented Streamlit
@@ -393,6 +402,35 @@ def format_deadline(deadline: datetime, now: datetime) -> tuple[str, str]:
         else "fl-deadline-ok"
     )
     return text, css
+
+
+#: How a claim's status reads to people (a claim, not a donation, status).
+CLAIM_LABEL: dict[ClaimStatus, str] = {
+    ClaimStatus.RESERVED: "Ready for pickup",
+    ClaimStatus.COLLECTED: "Collected",
+    ClaimStatus.CANCELLED: "Released",
+    ClaimStatus.EXPIRED: "Expired",
+}
+
+
+@st.cache_data(show_spinner=False)
+def pickup_qr_png(code: str) -> bytes:
+    """PNG QR code encoding the bare pickup code (high error correction so a
+    cracked or glare-covered phone screen still scans)."""
+    buf = io.BytesIO()
+    segno.make(code, error="h", micro=False).save(
+        buf, kind="png", scale=8, border=2, dark=FOREST_DARK)
+    return buf.getvalue()
+
+
+def pickup_code(code: str, key: str) -> None:
+    """Show a pickup code large enough to read out at handover (st.code keeps
+    the copy button; the keyed container scopes the larger styling), plus a
+    QR code of the same value for the donor to scan."""
+    with st.container(key=f"fl_pickup_{key}"):
+        st.code(code, language=None)
+        st.image(pickup_qr_png(code), width=180,
+                 caption="Or let the donor scan this QR code")
 
 
 def allergen_summary(donation: Donation) -> str:
