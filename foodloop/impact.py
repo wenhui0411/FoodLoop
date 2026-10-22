@@ -84,20 +84,29 @@ class RecipientImpact:
     progress"; CANCELLED/EXPIRED count as neither. Quantities stay in their
     original units — never converted — with reserved and collected kept
     separate. No environmental/"meals" figures (no defensible methodology).
+
+    ``pickup_rate`` mirrors the donor's ``collection_rate``:
+    ``confirmed_collections / rate_denominator`` where ``rate_denominator =
+    confirmed_collections + expired_claims``. Cancelled claims are excluded —
+    cancelling releases the food in time, which should never lower the rate.
+    ``None`` when nothing has concluded yet.
     """
 
     recipient_id: str
     confirmed_collections: int                      # COLLECTED claims
     active_claims: int                              # RESERVED claims
     donors_supported: int
+    expired_claims: int = 0
+    cancelled_claims: int = 0
+    rate_denominator: int = 0                       # confirmed + expired
+    pickup_rate: float | None = None
     collected_by_unit: dict[str, float] = field(default_factory=dict)
     reserved_by_unit: dict[str, float] = field(default_factory=dict)
 
 
 def recipient_impact(repo: Repository, recipient_id: str) -> RecipientImpact:
     """Compute a recipient's claim-accurate impact from persisted data."""
-    confirmed = 0
-    active = 0
+    confirmed = active = expired = cancelled = 0
     collected_by_unit: dict[str, float] = defaultdict(float)
     reserved_by_unit: dict[str, float] = defaultdict(float)
     donors: set[str] = set()
@@ -111,12 +120,21 @@ def recipient_impact(repo: Repository, recipient_id: str) -> RecipientImpact:
         elif claim.status is ClaimStatus.RESERVED:
             active += 1
             reserved_by_unit[unit] += claim.quantity_value
+        elif claim.status is ClaimStatus.EXPIRED:
+            expired += 1
+        elif claim.status is ClaimStatus.CANCELLED:
+            cancelled += 1
 
+    denominator = confirmed + expired
     return RecipientImpact(
         recipient_id=recipient_id,
         confirmed_collections=confirmed,
         active_claims=active,
         donors_supported=len(donors),
+        expired_claims=expired,
+        cancelled_claims=cancelled,
+        rate_denominator=denominator,
+        pickup_rate=(confirmed / denominator) if denominator > 0 else None,
         collected_by_unit=dict(collected_by_unit),
         reserved_by_unit=dict(reserved_by_unit),
     )

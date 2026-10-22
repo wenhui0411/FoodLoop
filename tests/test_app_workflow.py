@@ -453,6 +453,7 @@ def test_recipient_impact_metrics_preserved(db_path):
     assert _metric(at, "Confirmed collections") == "1"
     assert _metric(at, "In progress") == "1"
     assert _metric(at, "Donors supported") == "1"
+    assert _metric(at, "Pickup rate") == "100%"         # 1 of 1 concluded claim
 
 
 # --------------------------------------------------------------------------

@@ -184,6 +184,29 @@ def test_recipient_impact_excludes_expired_claims(repo, now):
     repo.expire_overdue(now + timedelta(minutes=5))     # c1 -> EXPIRED
     ri = impact.recipient_impact(repo, "r1")
     assert ri.confirmed_collections == 0 and ri.active_claims == 0
+    assert ri.expired_claims == 1
+
+
+def test_recipient_pickup_rate_counts_expired_but_not_cancelled(repo, now):
+    _setup(repo)
+    for i in range(3):
+        _don(repo, now, f"ok{i}")
+        _collect(repo, now, f"c{i}", f"ok{i}")              # 3 collected
+    _don(repo, now, "late", short=True)
+    _reserve(repo, now, "cx", "late")
+    repo.expire_overdue(now + timedelta(minutes=5))          # 1 expired
+    _don(repo, now, "rel")
+    _reserve(repo, now, "cc", "rel")
+    repo.cancel_claim("cc", now=now)                        # 1 cancelled
+    _don(repo, now, "open")
+    _reserve(repo, now, "co", "open")                       # 1 still open
+    _don(repo, now, "other")
+    _collect(repo, now, "c9", "other", rid="r2")            # another recipient's
+
+    ri = impact.recipient_impact(repo, "r1")
+    assert (ri.expired_claims, ri.cancelled_claims, ri.active_claims) == (1, 1, 1)
+    assert ri.rate_denominator == 4
+    assert ri.pickup_rate == 0.75
 
 
 def test_recipient_impact_empty(repo, now):
@@ -193,3 +216,4 @@ def test_recipient_impact_empty(repo, now):
     assert ri.active_claims == 0
     assert ri.donors_supported == 0
     assert ri.collected_by_unit == {} and ri.reserved_by_unit == {}
+    assert ri.pickup_rate is None and ri.rate_denominator == 0

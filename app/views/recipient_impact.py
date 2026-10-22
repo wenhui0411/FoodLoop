@@ -26,18 +26,32 @@ recipient = persona.recipient
 ri = impact.recipient_impact(service.repo, recipient.id)
 st.caption(f"Impact for **{recipient.name}**.")
 
-if ri.confirmed_collections == 0 and ri.active_claims == 0:
+if not (ri.confirmed_collections or ri.active_claims
+        or ri.expired_claims or ri.cancelled_claims):
     st.info("No claims yet. Browse the **Marketplace** to find eligible donations to "
             "collect, and your impact will appear here.")
     st.stop()
 
 with st.container(border=True, key="fl_metricgrid"):
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Confirmed collections", ri.confirmed_collections,
               help="Only food you have explicitly confirmed as collected.")
     c2.metric("In progress", ri.active_claims, help="Claimed, not yet collected.")
     c3.metric("Donors supported", ri.donors_supported,
               help="Distinct donors whose food you have collected.")
+    c4.metric("Pickup rate",
+              "—" if ri.pickup_rate is None else f"{ri.pickup_rate * 100:.0f}%",
+              help="Collected ÷ (collected + expired) claims. Cancelling releases "
+                   "the food in time, so cancelled claims don't lower it.")
+    if ri.pickup_rate is None:
+        st.caption("Pickup rate needs at least one *concluded* claim "
+                   "(collected or expired).")
+    else:
+        st.caption(
+            f"Pickup rate = {ri.confirmed_collections} collected ÷ "
+            f"{ri.rate_denominator} concluded claims · {ri.expired_claims} expired "
+            f"before pickup · {ri.cancelled_claims} cancelled (not counted)."
+        )
 
 ui.section_title("Food rescued (confirmed)", "🍽️")
 if ri.collected_by_unit:

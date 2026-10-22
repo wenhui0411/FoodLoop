@@ -271,6 +271,9 @@ def test_impact_counts_confirmed_collections_in_original_units(app):
     _, after = call(app, "GET", "/api/impact?orgId=rec-hope&role=recipient")
     assert after["confirmedCollections"] == before["confirmedCollections"] + 1
     assert after["collectedByUnit"]["loaves"] == before["collectedByUnit"].get("loaves", 0) + 5
+    assert after["rateDenominator"] == before["rateDenominator"] + 1
+    assert after["pickupRate"] == after["confirmedCollections"] / after["rateDenominator"]
+    assert {"expiredClaims", "cancelledClaims"} <= set(after)
     _, donor = call(app, "GET", "/api/impact?orgId=don-bakery&role=donor")
     assert {"collectionRate", "rateDenominator", "organisationsHelped"} <= set(donor)
     assert not {"meals", "co2e", "kg"} & (set(after) | set(donor))        # nothing invented
